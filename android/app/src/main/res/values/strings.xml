@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">KucekPro</string>
+    <string name="title_activity_main">KucekPro</string>
+    <string name="package_name">id.co.proyek.kucekpro</string>
+    <string name="custom_url_scheme">id.co.proyek.kucekpro</string>
+</resources>
