@@ -308,7 +308,7 @@ public class ThermalPrinterPlugin extends Plugin {
     } catch (Exception ignored) {
     }
 
-    for (int channel = 1; channel <= 30; channel++) {
+    for (int channel = 1; channel <= 12; channel++) {
       if (insecureMethod != null) {
         try {
           return connectSocket(adapter, (BluetoothSocket) insecureMethod.invoke(device, channel));
@@ -342,7 +342,7 @@ public class ThermalPrinterPlugin extends Plugin {
 
   private void sleepBeforeRetry() {
     try {
-      Thread.sleep(700);
+      Thread.sleep(250);
     } catch (InterruptedException error) {
       Thread.currentThread().interrupt();
     }
