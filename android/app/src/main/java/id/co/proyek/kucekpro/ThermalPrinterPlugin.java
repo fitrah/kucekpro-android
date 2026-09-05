@@ -4,8 +4,12 @@ import android.Manifest;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothSocket;
+import android.content.ContentValues;
 import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.os.Build;
+import android.os.Environment;
+import android.provider.MediaStore;
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.PermissionState;
@@ -15,6 +19,8 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.Permission;
 import com.getcapacitor.annotation.PermissionCallback;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.OutputStream;
 import java.lang.reflect.Method;
 import java.nio.charset.Charset;
@@ -128,6 +134,74 @@ public class ThermalPrinterPlugin extends Plugin {
     }
   }
 
+  @PluginMethod
+  public void saveText(PluginCall call) {
+    String text = call.getString("text");
+    String requestedFileName = call.getString("fileName");
+    if (text == null || text.trim().isEmpty()) {
+      call.reject("Teks struk kosong.");
+      return;
+    }
+
+    String fileName = sanitizeFileName(requestedFileName);
+    try {
+      if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+        File directory = new File(
+          Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+          "KucekPro"
+        );
+        if (!directory.exists() && !directory.mkdirs()) {
+          throw new Exception("Tidak bisa membuat folder Download/KucekPro.");
+        }
+        File file = new File(directory, fileName);
+        OutputStream output = new FileOutputStream(file);
+        try {
+          output.write(text.getBytes(Charset.forName("UTF-8")));
+          output.flush();
+        } finally {
+          output.close();
+        }
+
+        JSObject result = new JSObject();
+        result.put("saved", true);
+        result.put("fileName", fileName);
+        result.put("location", "Download/KucekPro/" + fileName);
+        call.resolve(result);
+        return;
+      }
+
+      ContentValues values = new ContentValues();
+      values.put(MediaStore.MediaColumns.DISPLAY_NAME, fileName);
+      values.put(MediaStore.MediaColumns.MIME_TYPE, "text/plain");
+      values.put(
+        MediaStore.MediaColumns.RELATIVE_PATH,
+        Environment.DIRECTORY_DOWNLOADS + "/KucekPro"
+      );
+
+      Uri uri = getContext()
+        .getContentResolver()
+        .insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+      if (uri == null) throw new Exception("Tidak bisa membuat file struk.");
+
+      OutputStream output = getContext().getContentResolver().openOutputStream(uri);
+      if (output == null) throw new Exception("Tidak bisa membuka file struk.");
+      try {
+        output.write(text.getBytes(Charset.forName("UTF-8")));
+        output.flush();
+      } finally {
+        output.close();
+      }
+
+      JSObject result = new JSObject();
+      result.put("saved", true);
+      result.put("fileName", fileName);
+      result.put("location", "Download/KucekPro/" + fileName);
+      call.resolve(result);
+    } catch (Exception error) {
+      call.reject("Gagal menyimpan struk: " + error.getMessage(), error);
+    }
+  }
+
   @PermissionCallback
   private void bluetoothPermsCallback(PluginCall call) {
     if (getPermissionState("bluetooth") == PermissionState.GRANTED) {
@@ -182,39 +256,40 @@ public class ThermalPrinterPlugin extends Plugin {
     adapter.cancelDiscovery();
 
     Exception lastError = null;
-    BluetoothSocket socket = null;
 
     try {
-      socket = device.createRfcommSocketToServiceRecord(SPP_UUID);
-      socket.connect();
-      return socket;
+      return connectSocket(device.createRfcommSocketToServiceRecord(SPP_UUID));
     } catch (Exception error) {
       lastError = error;
-      closeQuietly(socket);
-      sleepBeforeRetry();
     }
 
     try {
-      socket = device.createInsecureRfcommSocketToServiceRecord(SPP_UUID);
-      socket.connect();
-      return socket;
+      return connectSocket(device.createInsecureRfcommSocketToServiceRecord(SPP_UUID));
     } catch (Exception error) {
       lastError = error;
-      closeQuietly(socket);
-      sleepBeforeRetry();
     }
 
-    try {
-      Method method = device.getClass().getMethod("createRfcommSocket", int.class);
-      socket = (BluetoothSocket) method.invoke(device, 1);
-      socket.connect();
-      return socket;
-    } catch (Exception error) {
-      lastError = error;
-      closeQuietly(socket);
+    Method method = device.getClass().getMethod("createRfcommSocket", int.class);
+    for (int channel = 1; channel <= 4; channel++) {
+      try {
+        return connectSocket((BluetoothSocket) method.invoke(device, channel));
+      } catch (Exception error) {
+        lastError = error;
+      }
     }
 
     throw lastError == null ? new Exception("Tidak bisa membuka koneksi printer.") : lastError;
+  }
+
+  private BluetoothSocket connectSocket(BluetoothSocket socket) throws Exception {
+    try {
+      socket.connect();
+      return socket;
+    } catch (Exception error) {
+      closeQuietly(socket);
+      sleepBeforeRetry();
+      throw error;
+    }
   }
 
   private void sleepBeforeRetry() {
@@ -240,5 +315,13 @@ public class ThermalPrinterPlugin extends Plugin {
     } catch (SecurityException error) {
       return "Printer Bluetooth";
     }
+  }
+
+  private String sanitizeFileName(String value) {
+    String fileName = value == null ? "" : value.trim();
+    if (fileName.isEmpty()) fileName = "struk-kucekpro.txt";
+    fileName = fileName.replaceAll("[^A-Za-z0-9._-]", "-").replaceAll("-+", "-");
+    if (!fileName.toLowerCase().endsWith(".txt")) fileName = fileName + ".txt";
+    return fileName;
   }
 }
