@@ -47,6 +47,18 @@ import java.util.UUID;
 public class ThermalPrinterPlugin extends Plugin {
   private static final UUID SPP_UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
 
+  private static class ConnectionResult {
+    BluetoothSocket socket;
+    String method;
+    List<String> attempts;
+
+    ConnectionResult(BluetoothSocket socket, String method, List<String> attempts) {
+      this.socket = socket;
+      this.method = method;
+      this.attempts = attempts;
+    }
+  }
+
   @PluginMethod
   public void isAvailable(PluginCall call) {
     JSObject result = new JSObject();
@@ -79,6 +91,7 @@ public class ThermalPrinterPlugin extends Plugin {
       JSObject item = new JSObject();
       item.put("name", safeDeviceName(device));
       item.put("address", device.getAddress());
+      item.put("uuids", joinUuids(printerUuids(device)));
       devices.put(item);
     }
 
@@ -119,7 +132,8 @@ public class ThermalPrinterPlugin extends Plugin {
 
     BluetoothSocket socket = null;
     try {
-      socket = connectToPrinter(device, adapter);
+      ConnectionResult connection = connectToPrinter(device, adapter);
+      socket = connection.socket;
 
       OutputStream output = socket.getOutputStream();
       output.write(new byte[] { 0x1B, 0x40 });
@@ -131,9 +145,53 @@ public class ThermalPrinterPlugin extends Plugin {
       result.put("printed", true);
       result.put("printerName", safeDeviceName(device));
       result.put("printerAddress", device.getAddress());
+      result.put("connectionMethod", connection.method);
+      result.put("debug", joinAttempts(connection.attempts));
       call.resolve(result);
     } catch (Exception error) {
       call.reject("Gagal mencetak ke printer Bluetooth: " + error.getMessage(), error);
+    } finally {
+      closeQuietly(socket);
+    }
+  }
+
+  @PluginMethod
+  public void testConnection(PluginCall call) {
+    if (!hasBluetoothPermission()) {
+      requestBluetoothPermission(call);
+      return;
+    }
+
+    String address = call.getString("address");
+    BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
+    if (adapter == null) {
+      call.reject("Bluetooth tidak tersedia di perangkat ini.");
+      return;
+    }
+    if (!adapter.isEnabled()) {
+      call.reject("Bluetooth belum aktif.");
+      return;
+    }
+
+    BluetoothDevice device = findDevice(adapter, address);
+    if (device == null) {
+      call.reject("Printer Bluetooth belum dipilih atau belum dipairing.");
+      return;
+    }
+
+    BluetoothSocket socket = null;
+    try {
+      ConnectionResult connection = connectToPrinter(device, adapter);
+      socket = connection.socket;
+      JSObject result = new JSObject();
+      result.put("connected", true);
+      result.put("printerName", safeDeviceName(device));
+      result.put("printerAddress", device.getAddress());
+      result.put("connectionMethod", connection.method);
+      result.put("debug", joinAttempts(connection.attempts));
+      call.resolve(result);
+    } catch (Exception error) {
+      call.reject("Gagal hubungkan printer Bluetooth: " + error.getMessage(), error);
     } finally {
       closeQuietly(socket);
     }
@@ -237,6 +295,7 @@ public class ThermalPrinterPlugin extends Plugin {
     if (getPermissionState("bluetooth") == PermissionState.GRANTED) {
       if ("listPrinters".equals(call.getMethodName())) listPrinters(call);
       else if ("printText".equals(call.getMethodName())) printText(call);
+      else if ("testConnection".equals(call.getMethodName())) testConnection(call);
       else call.resolve();
     } else {
       call.reject("Izin Bluetooth dibutuhkan untuk mencetak struk.");
@@ -281,21 +340,34 @@ public class ThermalPrinterPlugin extends Plugin {
     return bondedDevices.isEmpty() ? null : bondedDevices.iterator().next();
   }
 
-  private BluetoothSocket connectToPrinter(BluetoothDevice device, BluetoothAdapter adapter)
+  private ConnectionResult connectToPrinter(BluetoothDevice device, BluetoothAdapter adapter)
     throws Exception {
     adapter.cancelDiscovery();
 
     Exception lastError = null;
+    List<String> attempts = new ArrayList<>();
 
     for (UUID uuid : printerUuids(device)) {
+      String insecureLabel = "insecure-spp:" + uuid;
       try {
-        return connectSocket(adapter, device.createInsecureRfcommSocketToServiceRecord(uuid));
+        return connectSocket(
+          adapter,
+          device.createInsecureRfcommSocketToServiceRecord(uuid),
+          insecureLabel,
+          attempts
+        );
       } catch (Exception error) {
         lastError = error;
       }
 
+      String secureLabel = "secure-spp:" + uuid;
       try {
-        return connectSocket(adapter, device.createRfcommSocketToServiceRecord(uuid));
+        return connectSocket(
+          adapter,
+          device.createRfcommSocketToServiceRecord(uuid),
+          secureLabel,
+          attempts
+        );
       } catch (Exception error) {
         lastError = error;
       }
@@ -310,30 +382,50 @@ public class ThermalPrinterPlugin extends Plugin {
 
     for (int channel = 1; channel <= 12; channel++) {
       if (insecureMethod != null) {
+        String label = "insecure-rfcomm-channel-" + channel;
         try {
-          return connectSocket(adapter, (BluetoothSocket) insecureMethod.invoke(device, channel));
+          return connectSocket(
+            adapter,
+            (BluetoothSocket) insecureMethod.invoke(device, channel),
+            label,
+            attempts
+          );
         } catch (Exception error) {
           lastError = error;
         }
       }
 
+      String label = "secure-rfcomm-channel-" + channel;
       try {
-        return connectSocket(adapter, (BluetoothSocket) secureMethod.invoke(device, channel));
+        return connectSocket(
+          adapter,
+          (BluetoothSocket) secureMethod.invoke(device, channel),
+          label,
+          attempts
+        );
       } catch (Exception error) {
         lastError = error;
       }
     }
 
-    throw lastError == null ? new Exception("Tidak bisa membuka koneksi printer.") : lastError;
+    String message = lastError == null ? "Tidak bisa membuka koneksi printer." : lastError.getMessage();
+    throw new Exception(message + "\nDEBUG:\n" + joinAttempts(attempts), lastError);
   }
 
-  private BluetoothSocket connectSocket(BluetoothAdapter adapter, BluetoothSocket socket) throws Exception {
+  private ConnectionResult connectSocket(
+    BluetoothAdapter adapter,
+    BluetoothSocket socket,
+    String label,
+    List<String> attempts
+  ) throws Exception {
     try {
       adapter.cancelDiscovery();
       sleepBeforeRetry();
       socket.connect();
-      return socket;
+      attempts.add(label + " => OK");
+      return new ConnectionResult(socket, label, attempts);
     } catch (Exception error) {
+      attempts.add(label + " => " + shortError(error));
       closeQuietly(socket);
       sleepBeforeRetry();
       throw error;
@@ -378,6 +470,27 @@ public class ThermalPrinterPlugin extends Plugin {
     } catch (Exception ignored) {
     }
     return new ArrayList<>(uuids);
+  }
+
+  private String joinUuids(List<UUID> uuids) {
+    List<String> values = new ArrayList<>();
+    for (UUID uuid : uuids) values.add(uuid.toString());
+    return joinAttempts(values);
+  }
+
+  private String joinAttempts(List<String> attempts) {
+    StringBuilder builder = new StringBuilder();
+    for (int index = 0; index < attempts.size(); index++) {
+      if (index > 0) builder.append("\n");
+      builder.append(attempts.get(index));
+    }
+    return builder.toString();
+  }
+
+  private String shortError(Exception error) {
+    String message = error.getMessage();
+    if (message == null || message.trim().isEmpty()) return error.getClass().getSimpleName();
+    return error.getClass().getSimpleName() + ": " + message;
   }
 
   private void saveBytes(String fileName, String mimeType, byte[] bytes) throws Exception {
