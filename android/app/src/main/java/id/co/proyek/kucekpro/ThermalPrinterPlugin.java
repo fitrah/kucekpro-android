@@ -16,6 +16,7 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.Permission;
 import com.getcapacitor.annotation.PermissionCallback;
 import java.io.OutputStream;
+import java.lang.reflect.Method;
 import java.nio.charset.Charset;
 import java.util.Set;
 import java.util.UUID;
@@ -23,7 +24,13 @@ import java.util.UUID;
 @CapacitorPlugin(
   name = "ThermalPrinter",
   permissions = {
-    @Permission(strings = { Manifest.permission.BLUETOOTH_CONNECT }, alias = "bluetoothConnect")
+    @Permission(
+      strings = {
+        Manifest.permission.BLUETOOTH_CONNECT,
+        Manifest.permission.BLUETOOTH_SCAN
+      },
+      alias = "bluetooth"
+    )
   }
 )
 public class ThermalPrinterPlugin extends Plugin {
@@ -40,8 +47,8 @@ public class ThermalPrinterPlugin extends Plugin {
 
   @PluginMethod
   public void listPrinters(PluginCall call) {
-    if (!hasBluetoothConnectPermission()) {
-      requestBluetoothConnectPermission(call);
+    if (!hasBluetoothPermission()) {
+      requestBluetoothPermission(call);
       return;
     }
 
@@ -71,8 +78,8 @@ public class ThermalPrinterPlugin extends Plugin {
 
   @PluginMethod
   public void printText(PluginCall call) {
-    if (!hasBluetoothConnectPermission()) {
-      requestBluetoothConnectPermission(call);
+    if (!hasBluetoothPermission()) {
+      requestBluetoothPermission(call);
       return;
     }
 
@@ -101,9 +108,7 @@ public class ThermalPrinterPlugin extends Plugin {
 
     BluetoothSocket socket = null;
     try {
-      socket = device.createRfcommSocketToServiceRecord(SPP_UUID);
-      adapter.cancelDiscovery();
-      socket.connect();
+      socket = connectToPrinter(device, adapter);
 
       OutputStream output = socket.getOutputStream();
       output.write(new byte[] { 0x1B, 0x40 });
@@ -119,18 +124,13 @@ public class ThermalPrinterPlugin extends Plugin {
     } catch (Exception error) {
       call.reject("Gagal mencetak ke printer Bluetooth: " + error.getMessage(), error);
     } finally {
-      if (socket != null) {
-        try {
-          socket.close();
-        } catch (Exception ignored) {
-        }
-      }
+      closeQuietly(socket);
     }
   }
 
   @PermissionCallback
-  private void bluetoothConnectPermsCallback(PluginCall call) {
-    if (getPermissionState("bluetoothConnect") == PermissionState.GRANTED) {
+  private void bluetoothPermsCallback(PluginCall call) {
+    if (getPermissionState("bluetooth") == PermissionState.GRANTED) {
       if ("listPrinters".equals(call.getMethodName())) listPrinters(call);
       else if ("printText".equals(call.getMethodName())) printText(call);
       else call.resolve();
@@ -139,21 +139,25 @@ public class ThermalPrinterPlugin extends Plugin {
     }
   }
 
-  private boolean hasBluetoothConnectPermission() {
+  private boolean hasBluetoothPermission() {
     return (
       Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
-      getContext().checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) ==
-        PackageManager.PERMISSION_GRANTED
+      (
+        getContext().checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) ==
+          PackageManager.PERMISSION_GRANTED &&
+        getContext().checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) ==
+          PackageManager.PERMISSION_GRANTED
+      )
     );
   }
 
-  private void requestBluetoothConnectPermission(PluginCall call) {
+  private void requestBluetoothPermission(PluginCall call) {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
       call.reject("Izin Bluetooth tidak tersedia.");
       return;
     }
     saveCall(call);
-    requestPermissionForAlias("bluetoothConnect", call, "bluetoothConnectPermsCallback");
+    requestPermissionForAlias("bluetooth", call, "bluetoothPermsCallback");
   }
 
   private BluetoothDevice findDevice(BluetoothAdapter adapter, String address) {
@@ -171,6 +175,62 @@ public class ThermalPrinterPlugin extends Plugin {
       }
     }
     return bondedDevices.isEmpty() ? null : bondedDevices.iterator().next();
+  }
+
+  private BluetoothSocket connectToPrinter(BluetoothDevice device, BluetoothAdapter adapter)
+    throws Exception {
+    adapter.cancelDiscovery();
+
+    Exception lastError = null;
+    BluetoothSocket socket = null;
+
+    try {
+      socket = device.createRfcommSocketToServiceRecord(SPP_UUID);
+      socket.connect();
+      return socket;
+    } catch (Exception error) {
+      lastError = error;
+      closeQuietly(socket);
+      sleepBeforeRetry();
+    }
+
+    try {
+      socket = device.createInsecureRfcommSocketToServiceRecord(SPP_UUID);
+      socket.connect();
+      return socket;
+    } catch (Exception error) {
+      lastError = error;
+      closeQuietly(socket);
+      sleepBeforeRetry();
+    }
+
+    try {
+      Method method = device.getClass().getMethod("createRfcommSocket", int.class);
+      socket = (BluetoothSocket) method.invoke(device, 1);
+      socket.connect();
+      return socket;
+    } catch (Exception error) {
+      lastError = error;
+      closeQuietly(socket);
+    }
+
+    throw lastError == null ? new Exception("Tidak bisa membuka koneksi printer.") : lastError;
+  }
+
+  private void sleepBeforeRetry() {
+    try {
+      Thread.sleep(300);
+    } catch (InterruptedException error) {
+      Thread.currentThread().interrupt();
+    }
+  }
+
+  private void closeQuietly(BluetoothSocket socket) {
+    if (socket == null) return;
+    try {
+      socket.close();
+    } catch (Exception ignored) {
+    }
   }
 
   private String safeDeviceName(BluetoothDevice device) {
