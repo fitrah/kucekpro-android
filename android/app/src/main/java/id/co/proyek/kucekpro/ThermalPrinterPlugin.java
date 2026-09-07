@@ -10,6 +10,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
 import android.os.ParcelUuid;
+import android.os.SystemClock;
 import android.provider.MediaStore;
 import android.util.Base64;
 import com.getcapacitor.JSArray;
@@ -31,6 +32,9 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.Timer;
+import java.util.TimerTask;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @CapacitorPlugin(
   name = "ThermalPrinter",
@@ -131,26 +135,41 @@ public class ThermalPrinterPlugin extends Plugin {
     }
 
     BluetoothSocket socket = null;
+    Timer writeTimeout = null;
+    AtomicBoolean writeExpired = new AtomicBoolean(false);
+    String stage = "membuka koneksi";
     try {
       ConnectionResult connection = connectToPrinter(device, adapter);
       socket = connection.socket;
-
+      stage = "mengirim data (batas waktu 15 detik)";
+      writeTimeout = closeAfter(socket, 15000, writeExpired);
       OutputStream output = socket.getOutputStream();
       output.write(new byte[] { 0x1B, 0x40 });
-      output.write(text.getBytes(Charset.forName("UTF-8")));
+      byte[] bytes = text.getBytes(Charset.forName("UTF-8"));
+      // Pace writes for printers with small receive buffers.
+      for (int offset = 0; offset < bytes.length; offset += 256) {
+        output.write(bytes, offset, Math.min(256, bytes.length - offset));
+        output.flush();
+        Thread.sleep(50);
+      }
       output.write(new byte[] { 0x0A, 0x0A, 0x0A, 0x1D, 0x56, 0x42, 0x00 });
       output.flush();
+      Thread.sleep(750);
+      if (writeExpired.get()) throw new Exception("Batas waktu pengiriman habis.");
 
       JSObject result = new JSObject();
       result.put("printed", true);
+      result.put("bytesSent", bytes.length);
       result.put("printerName", safeDeviceName(device));
       result.put("printerAddress", device.getAddress());
       result.put("connectionMethod", connection.method);
       result.put("debug", joinAttempts(connection.attempts));
       call.resolve(result);
     } catch (Exception error) {
-      call.reject("Gagal mencetak ke printer Bluetooth: " + error.getMessage(), error);
+      call.reject("Gagal " + stage + ": " + error.getMessage()
+        + "\nJika struk tercetak sebagian, periksa dulu sebelum mencetak ulang.", error);
     } finally {
+      if (writeTimeout != null) writeTimeout.cancel();
       closeQuietly(socket);
     }
   }
@@ -346,6 +365,7 @@ public class ThermalPrinterPlugin extends Plugin {
 
     Exception lastError = null;
     List<String> attempts = new ArrayList<>();
+    long deadline = SystemClock.elapsedRealtime() + 35000;
 
     for (UUID uuid : printerUuids(device)) {
       String insecureLabel = "insecure-spp:" + uuid;
@@ -354,7 +374,7 @@ public class ThermalPrinterPlugin extends Plugin {
           adapter,
           device.createInsecureRfcommSocketToServiceRecord(uuid),
           insecureLabel,
-          attempts
+          attempts, deadline
         );
       } catch (Exception error) {
         lastError = error;
@@ -366,7 +386,7 @@ public class ThermalPrinterPlugin extends Plugin {
           adapter,
           device.createRfcommSocketToServiceRecord(uuid),
           secureLabel,
-          attempts
+          attempts, deadline
         );
       } catch (Exception error) {
         lastError = error;
@@ -388,7 +408,7 @@ public class ThermalPrinterPlugin extends Plugin {
             adapter,
             (BluetoothSocket) insecureMethod.invoke(device, channel),
             label,
-            attempts
+            attempts, deadline
           );
         } catch (Exception error) {
           lastError = error;
@@ -401,7 +421,7 @@ public class ThermalPrinterPlugin extends Plugin {
           adapter,
           (BluetoothSocket) secureMethod.invoke(device, channel),
           label,
-          attempts
+          attempts, deadline
         );
       } catch (Exception error) {
         lastError = error;
@@ -416,9 +436,14 @@ public class ThermalPrinterPlugin extends Plugin {
     BluetoothAdapter adapter,
     BluetoothSocket socket,
     String label,
-    List<String> attempts
+    List<String> attempts,
+    long deadline
   ) throws Exception {
+    Timer timeout = null;
     try {
+      long remaining = deadline - SystemClock.elapsedRealtime();
+      if (remaining <= 0) throw new Exception("Batas waktu koneksi 35 detik habis.");
+      timeout = closeAfter(socket, Math.min(5000, remaining));
       adapter.cancelDiscovery();
       sleepBeforeRetry();
       socket.connect();
@@ -427,9 +452,27 @@ public class ThermalPrinterPlugin extends Plugin {
     } catch (Exception error) {
       attempts.add(label + " => " + shortError(error));
       closeQuietly(socket);
-      sleepBeforeRetry();
+      if (SystemClock.elapsedRealtime() < deadline) sleepBeforeRetry();
       throw error;
+    } finally {
+      if (timeout != null) timeout.cancel();
     }
+  }
+
+  private Timer closeAfter(BluetoothSocket socket, long milliseconds) {
+    return closeAfter(socket, milliseconds, new AtomicBoolean(false));
+  }
+
+  private Timer closeAfter(BluetoothSocket socket, long milliseconds, AtomicBoolean expired) {
+    Timer timer = new Timer(true);
+    timer.schedule(new TimerTask() {
+      @Override
+      public void run() {
+        expired.set(true);
+        closeQuietly(socket);
+      }
+    }, milliseconds);
+    return timer;
   }
 
   private void sleepBeforeRetry() {
