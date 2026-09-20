@@ -175,6 +175,75 @@ public class ThermalPrinterPlugin extends Plugin {
   }
 
   @PluginMethod
+  public void printRaw(PluginCall call) {
+    if (!hasBluetoothPermission()) {
+      requestBluetoothPermission(call);
+      return;
+    }
+
+    String dataBase64 = call.getString("dataBase64");
+    String address = call.getString("address");
+    if (dataBase64 == null || dataBase64.trim().isEmpty()) {
+      call.reject("Data struk kosong.");
+      return;
+    }
+
+    BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
+    if (adapter == null) {
+      call.reject("Bluetooth tidak tersedia di perangkat ini.");
+      return;
+    }
+    if (!adapter.isEnabled()) {
+      call.reject("Bluetooth belum aktif.");
+      return;
+    }
+
+    BluetoothDevice device = findDevice(adapter, address);
+    if (device == null) {
+      call.reject("Printer Bluetooth belum dipilih atau belum dipairing.");
+      return;
+    }
+
+    BluetoothSocket socket = null;
+    Timer writeTimeout = null;
+    AtomicBoolean writeExpired = new AtomicBoolean(false);
+    String stage = "membuka koneksi";
+    try {
+      byte[] bytes = android.util.Base64.decode(dataBase64, android.util.Base64.DEFAULT);
+      ConnectionResult connection = connectToPrinter(device, adapter);
+      socket = connection.socket;
+      stage = "mengirim data (batas waktu 15 detik)";
+      writeTimeout = closeAfter(socket, 15000, writeExpired);
+      OutputStream output = socket.getOutputStream();
+      output.write(new byte[] { 0x1B, 0x40 });
+      for (int offset = 0; offset < bytes.length; offset += 256) {
+        output.write(bytes, offset, Math.min(256, bytes.length - offset));
+        output.flush();
+        Thread.sleep(50);
+      }
+      output.write(new byte[] { 0x0A, 0x0A, 0x0A, 0x1D, 0x56, 0x42, 0x00 });
+      output.flush();
+      Thread.sleep(750);
+      if (writeExpired.get()) throw new Exception("Batas waktu pengiriman habis.");
+
+      JSObject result = new JSObject();
+      result.put("printed", true);
+      result.put("bytesSent", bytes.length);
+      result.put("printerName", safeDeviceName(device));
+      result.put("printerAddress", device.getAddress());
+      result.put("connectionMethod", connection.method);
+      result.put("debug", joinAttempts(connection.attempts));
+      call.resolve(result);
+    } catch (Exception error) {
+      call.reject("Gagal " + stage + ": " + error.getMessage()
+        + "\nJika struk tercetak sebagian, periksa dulu sebelum mencetak ulang.", error);
+    } finally {
+      if (writeTimeout != null) writeTimeout.cancel();
+      closeQuietly(socket);
+    }
+  }
+
+  @PluginMethod
   public void testConnection(PluginCall call) {
     if (!hasBluetoothPermission()) {
       requestBluetoothPermission(call);
@@ -314,6 +383,7 @@ public class ThermalPrinterPlugin extends Plugin {
     if (getPermissionState("bluetooth") == PermissionState.GRANTED) {
       if ("listPrinters".equals(call.getMethodName())) listPrinters(call);
       else if ("printText".equals(call.getMethodName())) printText(call);
+    else if ("printRaw".equals(call.getMethodName())) printRaw(call);
       else if ("testConnection".equals(call.getMethodName())) testConnection(call);
       else call.resolve();
     } else {
