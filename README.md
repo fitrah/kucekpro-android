@@ -2,7 +2,7 @@
 
 Native Android shell for KucekPro Laundry.
 
-The app loads `https://laundry.proyek.org` at runtime through Capacitor and keeps the native Android layer separate from the main web/backend repo.
+The app loads `https://kucekpro.kanezza.com` at runtime through Capacitor and keeps the native Android layer separate from the main web/backend repo.
 
 ## Requirements
 
@@ -40,5 +40,5 @@ npm run android:open
 
 - Package ID: `id.co.proyek.kucekpro`
 - App name: `KucekPro`
-- Production web URL: `https://laundry.proyek.org`
+- Production web URL: `https://kucekpro.kanezza.com`
 - Native Bluetooth thermal printer bridge lives in `android/app/src/main/java/id/co/proyek/kucekpro/ThermalPrinterPlugin.java`.

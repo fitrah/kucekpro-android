@@ -5,7 +5,7 @@ const config: CapacitorConfig = {
   appName: "KucekPro",
   webDir: "web",
   server: {
-    url: "https://laundry.proyek.org",
+    url: "https://kucekpro.kanezza.com",
     cleartext: false,
   },
 };
